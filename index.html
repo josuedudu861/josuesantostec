@@ -211,9 +211,10 @@
       object-fit: cover;
       object-position: 70% center;
       z-index: 2;
-      opacity: 0;
-      transition: opacity 0.5s ease;
+      opacity: 1;
       pointer-events: none;
+      will-change: transform;
+      transform: translateZ(0);
     }
 
     .hero-vignette {
@@ -1094,7 +1095,7 @@
   <div class="hero-container" id="heroContainer">
     <div class="hero-stage">
       <div class="hero-poster" id="heroPoster"></div>
-      <video id="heroVideo" preload="none" muted playsinline aria-hidden="true" tabindex="-1"></video>
+      <video id="heroVideo" preload="auto" muted playsinline webkit-playsinline src="assets/hero-scrub.mp4" poster="assets/hero-poster.jpg" aria-hidden="true" tabindex="-1"></video>
       <div class="hero-vignette"></div>
 
       <div class="hero-top-eyebrow">
@@ -1464,28 +1465,56 @@
     let lastTick = 0;
     let seekBusy = false;
     let pendingTime = null;
+    let seekTimer = null;
     let heroOnScreen = true;
 
     function requestSeek(t) {
-      if (!heroVideo.duration) return;
+      if (!heroVideo.duration || isNaN(heroVideo.duration)) return;
+      t = Math.max(0, Math.min(heroVideo.duration - 0.02, t));
+
       if (seekBusy) {
         pendingTime = t;
         return;
       }
+
+      if (Math.abs(heroVideo.currentTime - t) < 0.015) {
+        return;
+      }
+
       seekBusy = true;
-      heroVideo.currentTime = t;
+      clearTimeout(seekTimer);
+      seekTimer = setTimeout(() => {
+        seekBusy = false;
+        if (pendingTime !== null) {
+          const nextT = pendingTime;
+          pendingTime = null;
+          requestSeek(nextT);
+        }
+      }, 100);
+
+      try {
+        if ('fastSeek' in heroVideo) {
+          heroVideo.fastSeek(t);
+        } else {
+          heroVideo.currentTime = t;
+        }
+      } catch (err) {
+        seekBusy = false;
+      }
     }
 
     heroVideo.addEventListener('seeked', () => {
+      clearTimeout(seekTimer);
       seekBusy = false;
       if (pendingTime !== null) {
-        const t = pendingTime;
+        const nextT = pendingTime;
         pendingTime = null;
-        requestSeek(t);
+        requestSeek(nextT);
       }
     });
 
     heroVideo.addEventListener('error', () => {
+      clearTimeout(seekTimer);
       seekBusy = false;
       pendingTime = null;
     });
@@ -1547,8 +1576,10 @@
     }
 
     function updateGlobalScrollProgress() {
-      const winScroll = document.documentElement.scrollTop || document.body.scrollTop;
-      const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+      const winScroll = window.scrollY || (document.documentElement ? document.documentElement.scrollTop : 0) || 0;
+      const docHeight = document.documentElement ? document.documentElement.scrollHeight : document.body.scrollHeight;
+      const clientHeight = document.documentElement ? document.documentElement.clientHeight : window.innerHeight;
+      const height = docHeight - clientHeight;
       const scrolled = height > 0 ? (winScroll / height) * 100 : 0;
       if (scrollProgressBar) {
         scrollProgressBar.style.width = scrolled + '%';
@@ -1596,7 +1627,6 @@
     function markVideoReady() {
       if (isVideoReady) return;
       isVideoReady = true;
-      heroVideo.style.opacity = '1';
       heroPoster.style.opacity = '0';
       if (rafId === null) {
         lastTick = performance.now();
@@ -1604,31 +1634,28 @@
       }
     }
 
-    async function initHeroVideo() {
-      heroVideo.src = 'assets/hero-scrub.mp4';
-      heroVideo.load();
+    function initHeroVideo() {
+      heroVideo.muted = true;
+      heroVideo.playsInline = true;
 
       heroVideo.addEventListener('loadedmetadata', markVideoReady, { once: true });
+      heroVideo.addEventListener('loadeddata', markVideoReady, { once: true });
       heroVideo.addEventListener('canplay', markVideoReady, { once: true });
 
       if (heroVideo.readyState >= 1) {
         markVideoReady();
       }
 
-      if (location.protocol !== 'file:') {
-        try {
-          const res = await fetch('assets/hero-scrub.mp4');
-          if (res.ok) {
-            const blob = await res.blob();
-            const objUrl = URL.createObjectURL(blob);
-            const currentT = heroVideo.currentTime;
-            heroVideo.src = objUrl;
-            heroVideo.currentTime = currentT;
-            heroVideo.load();
-            heroVideo.addEventListener('loadedmetadata', markVideoReady, { once: true });
-            heroVideo.addEventListener('canplay', markVideoReady, { once: true });
-          }
-        } catch (e) {}
+      // Awaken GPU video decoding pipeline on muted video
+      const playPromise = heroVideo.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          heroVideo.pause();
+          heroVideo.currentTime = 0;
+          markVideoReady();
+        }).catch(() => {
+          markVideoReady();
+        });
       }
     }
 
