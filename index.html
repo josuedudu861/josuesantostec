@@ -989,6 +989,33 @@
       color: #ffffff;
     }
 
+    /* Scroll Effects */
+    .scroll-progress-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 3px;
+      width: 0%;
+      background: linear-gradient(90deg, #00d2ff, #3a86ff, #00d2ff);
+      background-size: 200% 100%;
+      z-index: 99999;
+      box-shadow: 0 0 12px rgba(0, 210, 255, 0.9), 0 0 24px rgba(0, 210, 255, 0.5);
+      pointer-events: none;
+      transition: width 0.08s ease-out;
+    }
+
+    .reveal-on-scroll {
+      opacity: 0;
+      transform: translateY(32px);
+      transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+      will-change: opacity, transform;
+    }
+
+    .reveal-on-scroll.revealed {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
     /* Responsive */
     @media (max-width: 1024px) {
       .navbar-wrapper { top: 16px; }
@@ -1014,6 +1041,7 @@
   </style>
 </head>
 <body>
+  <div class="scroll-progress-bar" id="scrollProgressBar" aria-hidden="true"></div>
 
   <div class="cosmic-layer" aria-hidden="true"></div>
 
@@ -1405,107 +1433,185 @@
     const caption3 = document.getElementById('caption3');
     const captionFinal = document.getElementById('captionFinal');
     const scrollIndicator = document.getElementById('scrollIndicator');
+    const scrollProgressBar = document.getElementById('scrollProgressBar');
 
     let isVideoReady = false;
-    let isSeeking = false;
-    let pendingProgress = null;
+    let targetProgress = 0;
+    let currentProgress = 0;
+    let rafId = null;
+    let lastTick = 0;
+    let seekBusy = false;
+    let pendingTime = null;
+    let heroOnScreen = true;
 
-    async function initHeroVideo() {
-      try {
-        const res = await fetch('assets/hero-scrub.mp4');
-        if (!res.ok) throw new Error('Video fetch error');
-        const blob = await res.blob();
-        heroVideo.src = URL.createObjectURL(blob);
-        await new Promise((resolve) => {
-          heroVideo.onloadedmetadata = resolve;
-        });
-        isVideoReady = true;
-        heroVideo.style.opacity = '1';
-        heroPoster.style.opacity = '0';
-        updateHero();
-      } catch (err) {
-        heroPoster.style.opacity = '1';
-      }
-    }
-
-    function seekVideo(progress) {
-      if (!isVideoReady || !heroVideo.duration) return;
-      if (isSeeking) {
-        pendingProgress = progress;
+    function requestSeek(t) {
+      if (!heroVideo.duration) return;
+      if (seekBusy) {
+        pendingTime = t;
         return;
       }
-      isSeeking = true;
-      heroVideo.currentTime = progress * heroVideo.duration;
+      seekBusy = true;
+      heroVideo.currentTime = t;
     }
 
     heroVideo.addEventListener('seeked', () => {
-      isSeeking = false;
-      if (pendingProgress !== null) {
-        const p = pendingProgress;
-        pendingProgress = null;
-        seekVideo(p);
+      seekBusy = false;
+      if (pendingTime !== null) {
+        const t = pendingTime;
+        pendingTime = null;
+        requestSeek(t);
       }
     });
 
     heroVideo.addEventListener('error', () => {
-      isSeeking = false;
-      pendingProgress = null;
+      seekBusy = false;
+      pendingTime = null;
     });
 
-    initHeroVideo();
-
-    let ticking = false;
-    function onScroll() {
-      if (!ticking) {
-        requestAnimationFrame(updateHero);
-        ticking = true;
-      }
-    }
-
-    function updateHero() {
-      const containerRect = heroContainer.getBoundingClientRect();
-      const containerTop = -containerRect.top;
-      const totalScrollable = heroContainer.offsetHeight - window.innerHeight;
-
-      let progress = 0;
-      if (totalScrollable > 0) {
-        progress = Math.min(Math.max(containerTop / totalScrollable, 0), 1);
-      }
-
-      seekVideo(progress);
-
-      // Plateaus
-      if (progress < 0.24) {
+    function updateCaptions(p) {
+      if (p < 0.24) {
         caption1.classList.add('active');
       } else {
         caption1.classList.remove('active');
       }
 
-      if (progress >= 0.26 && progress < 0.54) {
+      if (p >= 0.26 && p < 0.54) {
         caption2.classList.add('active');
       } else {
         caption2.classList.remove('active');
       }
 
-      if (progress >= 0.56 && progress < 0.80) {
+      if (p >= 0.56 && p < 0.80) {
         caption3.classList.add('active');
       } else {
         caption3.classList.remove('active');
       }
 
-      if (progress >= 0.82) {
+      if (p >= 0.82) {
         captionFinal.classList.add('active');
-        scrollIndicator.style.opacity = '0';
+        if (scrollIndicator) scrollIndicator.style.opacity = '0';
       } else {
         captionFinal.classList.remove('active');
-        scrollIndicator.style.opacity = progress > 0.05 ? '0.4' : '1';
+        if (scrollIndicator) scrollIndicator.style.opacity = p > 0.05 ? '0.4' : '1';
+      }
+    }
+
+    function tick(now) {
+      const dt = Math.min(100, now - (lastTick || now));
+      lastTick = now;
+      const k = 0.16; // 60fps-normalized exponential lerp
+      currentProgress += (targetProgress - currentProgress) * (1 - Math.pow(1 - k, dt / 16.667));
+
+      if (Math.abs(targetProgress - currentProgress) < 0.0004) {
+        currentProgress = targetProgress;
+        rafId = null;
+        lastTick = 0;
+      } else {
+        rafId = requestAnimationFrame(tick);
       }
 
-      ticking = false;
+      if (isVideoReady && heroVideo.duration) {
+        requestSeek(currentProgress * heroVideo.duration);
+      }
+      updateCaptions(currentProgress);
+    }
+
+    function getHeroProgress() {
+      const rect = heroContainer.getBoundingClientRect();
+      const top = -rect.top;
+      const total = heroContainer.offsetHeight - window.innerHeight;
+      if (total <= 0) return 0;
+      return Math.min(Math.max(top / total, 0), 1);
+    }
+
+    function updateGlobalScrollProgress() {
+      const winScroll = document.documentElement.scrollTop || document.body.scrollTop;
+      const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+      const scrolled = height > 0 ? (winScroll / height) * 100 : 0;
+      if (scrollProgressBar) {
+        scrollProgressBar.style.width = scrolled + '%';
+      }
+    }
+
+    function onScroll() {
+      targetProgress = getHeroProgress();
+      if (rafId === null && heroOnScreen) {
+        lastTick = performance.now();
+        rafId = requestAnimationFrame(tick);
+      }
+      updateGlobalScrollProgress();
     }
 
     window.addEventListener('scroll', onScroll, { passive: true });
-    updateHero();
+
+    if ('IntersectionObserver' in window) {
+      const heroObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          heroOnScreen = entry.isIntersecting;
+          if (heroOnScreen && rafId === null) {
+            lastTick = performance.now();
+            rafId = requestAnimationFrame(tick);
+          }
+        });
+      }, { threshold: 0 });
+      heroObserver.observe(heroContainer);
+
+      const revealObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('revealed');
+            revealObserver.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12 });
+
+      document.querySelectorAll('.award-glass-card, .profile-card, .pillar-card, .calculator-box, .faq-item, .cta-card').forEach((el) => {
+        el.classList.add('reveal-on-scroll');
+        revealObserver.observe(el);
+      });
+    }
+
+    function markVideoReady() {
+      if (isVideoReady) return;
+      isVideoReady = true;
+      heroVideo.style.opacity = '1';
+      heroPoster.style.opacity = '0';
+      if (rafId === null) {
+        lastTick = performance.now();
+        rafId = requestAnimationFrame(tick);
+      }
+    }
+
+    async function initHeroVideo() {
+      heroVideo.src = 'assets/hero-scrub.mp4';
+      heroVideo.load();
+
+      heroVideo.addEventListener('loadedmetadata', markVideoReady, { once: true });
+      heroVideo.addEventListener('canplay', markVideoReady, { once: true });
+
+      if (heroVideo.readyState >= 1) {
+        markVideoReady();
+      }
+
+      if (location.protocol !== 'file:') {
+        try {
+          const res = await fetch('assets/hero-scrub.mp4');
+          if (res.ok) {
+            const blob = await res.blob();
+            const objUrl = URL.createObjectURL(blob);
+            const currentT = heroVideo.currentTime;
+            heroVideo.src = objUrl;
+            heroVideo.currentTime = currentT;
+            heroVideo.load();
+            heroVideo.addEventListener('loadedmetadata', markVideoReady, { once: true });
+            heroVideo.addEventListener('canplay', markVideoReady, { once: true });
+          }
+        } catch (e) {}
+      }
+    }
+
+    initHeroVideo();
+    onScroll();
 
     // Interactive Calculator
     const teamSlider = document.getElementById('teamSlider');
